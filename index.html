@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>図形アニメーション・プレイグラウンド（安定版）</title>
+  <style>
+    body{margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans JP",sans-serif; display:grid; grid-template-columns:260px 1fr; height:100vh}
+    aside{border-right:1px solid #ddd; padding:12px; overflow:auto}
+    main{display:flex; flex-direction:column; gap:10px; align-items:center; justify-content:center; padding:12px}
+    canvas{border:1px solid #ccc; border-radius:12px}
+    h2{font-size:16px; margin:8px 0}
+    .btn{display:block; width:100%; text-align:left; padding:8px 10px; margin:4px 0; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer}
+    .btn:hover{background:#f6f6f6}
+    .btn.active{background:#eef5ff; border-color:#79a5ff}
+    .controls{display:grid; gap:8px; width:min(700px,90%)}
+    .controls label{display:grid; grid-template-columns:120px 1fr auto; align-items:center; gap:8px}
+    .topbar{display:flex; gap:8px; align-items:center}
+    .topbar button{padding:6px 10px; border:1px solid #bbb; border-radius:8px; background:#fff; cursor:pointer}
+    .topbar button:hover{background:#f2f2f2}
+    .muted{color:#666; font-size:12px}
+  </style>
+</head>
+<body>
+  <aside>
+    <h2>図形リスト</h2>
+    <button class="btn" data-shape="circle">円</button>
+    <button class="btn" data-shape="polygon">正多角形</button>
+    <button class="btn" data-shape="star">星型正多角形</button>
+    <button class="btn" data-shape="ellipse">楕円</button>
+    <button class="btn" data-shape="sector">扇形</button>
+    <button class="btn" data-shape="annulus">円環（ドーナツ）</button>
+    <button class="btn" data-shape="lissajous">リサージュ曲線</button>
+    <button class="btn" data-shape="rose">ローズ曲線</button>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <button id="stopBtn">停止</button>
+      <button id="clearBtn">クリア</button>
+      <button id="resetBtn">標準にリセット</button>
+      <span id="status" class="muted">準備完了</span>
+    </div>
+    <canvas id="cv" width="680" height="680"></canvas>
+    <div id="controls" class="controls"></div>
+  </main>
+
+  <script>
+    // ====== 基本セットアップ ======
+    const cv = document.getElementById('cv');
+    const ctx = cv.getContext('2d');
+    const cx = cv.width/2, cy = cv.height/2;
+    const R = Math.min(cx, cy) * 0.85;
+    const controls = document.getElementById('controls');
+    const statusEl = document.getElementById('status');
+
+    function clearCanvas(){ ctx.clearRect(0,0,cv.width,cv.height); }
+
+    // ====== アニメーション管理（重複防止） ======
+    let rafToken = 0; // これが変わると、古いアニメは自動停止
+    function cancelAnim(){ rafToken++; statusEl.textContent = '停止'; }
+    function runAnimation(step){
+      const myToken = ++rafToken; // 新しいアニメを発行
+      statusEl.textContent = '描画中…';
+      function frame(){
+        if(myToken !== rafToken) return; // 他の描画に切り替わったので停止
+        const cont = step();
+        if(cont){ requestAnimationFrame(frame); }
+        else { statusEl.textContent = '完了'; }
+      }
+      requestAnimationFrame(frame);
+    }
+
+    // ====== 標準値（デフォルト） ======
+    const DEFAULTS = {
+      circle:    { speed: 5 },
+      polygon:   { n: 5, speed: 6 },
+      star:      { n: 5, k: 2, speed: 6 },
+      ellipse:   { rx: 220, ry: 140, speed: 6 },
+      sector:    { r: 260, angle: 120, speed: 6 },
+      annulus:   { rOuter: 260, rInner: 140, speed: 6 },
+      lissajous: { a: 3, b: 5, delta: 90, speed: 6 },
+      rose:      { k: 5, speed: 6 }
+    };
+
+    // ====== 汎用ヘルパー ======
+    function addSlider(key, label, min, max, step, value, onChange){
+      const row = document.createElement('label');
+      const name = document.createElement('span'); name.textContent = label;
+      const input = document.createElement('input'); input.type='range'; input.min=min; input.max=max; input.step=step; input.value=value; input.style.width='100%';
+      const val = document.createElement('span'); val.textContent = value;
+      row.appendChild(name); row.appendChild(input); row.appendChild(val);
+      controls.appendChild(row);
+      input.addEventListener('input', () => { val.textContent = input.value; onChange(parseFloat(input.value)); });
+      return { input, set: (v)=>{ input.value=v; val.textContent=v; onChange(parseFloat(v)); } };
+    }
+
+    function polyVertices(n, r=R, rot=-Math.PI/2){
+      const pts=[]; for(let i=0;i<n;i++){ const a = 2*Math.PI*i/n + rot; pts.push([cx + r*Math.cos(a), cy + r*Math.sin(a)]); } return pts;
+    }
+
+    // ====== 図形定義 ======
+    const Shapes = {
+      circle: {
+        buildControls(){
+          controls.innerHTML = '';
+          const d = DEFAULTS.circle;
+          this._suppress = true;
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v => { this.speed=v; if(!this._suppress) this.restart(); });
+          this._els = { speed };
+          this.speed = d.speed;
+          this._suppress = false;
+        },
+        applyDefaults(){ const d = DEFAULTS.circle; this._suppress=true; this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const steps = 720; let i=0; const speed = parseInt(this.speed||5,10);
+          ctx.beginPath(); ctx.moveTo(cx+R, cy);
+          runAnimation(() => {
+            for(let k=0;k<speed;k++){
+              const a = (i/steps)*2*Math.PI; const x = cx + R*Math.cos(a), y = cy + R*Math.sin(a);
+              ctx.lineTo(x,y);
+              i++; if(i>steps){ ctx.stroke(); return false; }
+            }
+            ctx.stroke(); return true;
+          });
+        }
+      },
+      polygon: {
+        buildControls(){
+          controls.innerHTML = '';
+          const d = DEFAULTS.polygon;
+          this._suppress = true;
+          const n = addSlider('n','辺の数 n',3,20,1,d.n, v => { this.n=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v => { this.speed=v; if(!this._suppress) this.restart(); });
+          this._els = { n, speed };
+          this.n = d.n; this.speed = d.speed;
+          this._suppress = false;
+        },
+        applyDefaults(){ const d = DEFAULTS.polygon; this._suppress=true; this._els.n.set(d.n); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const pts = polyVertices(this.n);
+          let edge = 0; let t = 0; const segSteps = 120; const speed = this.speed;
+          runAnimation(() => {
+            for(let s=0;s<speed;s++){
+              if(edge >= pts.length) { ctx.stroke(); return false; }
+              const a = pts[edge]; const b = pts[(edge+1)%pts.length];
+              const x = a[0] + (b[0]-a[0])*(t/segSteps);
+              const y = a[1] + (b[1]-a[1])*(t/segSteps);
+              if(t===0){ ctx.beginPath(); ctx.moveTo(a[0], a[1]); }
+              ctx.lineTo(x,y);
+              t++;
+              if(t>segSteps){ edge++; t=0; }
+            }
+            ctx.stroke(); return true;
+          });
+        }
+      },
+      star: {
+        buildControls(){
+          controls.innerHTML = '';
+          const d = DEFAULTS.star;
+          this._suppress = true;
+          const n = addSlider('n','頂点数 n',5,20,1,d.n, v => { this.n=v; if(!this._suppress) this.restart(); });
+          const k = addSlider('k','飛ばす数 k',2,9,1,d.k, v => { this.k=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v => { this.speed=v; if(!this._suppress) this.restart(); });
+          this._els = { n, k, speed };
+          this.n = d.n; this.k=d.k; this.speed=d.speed;
+          this._suppress = false;
+        },
+        applyDefaults(){ const d = DEFAULTS.star; this._suppress=true; this._els.n.set(d.n); this._els.k.set(d.k); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const n=this.n, k=this.k; const order=[]; let idx=0; for(let i=0;i<n+1;i++){ order.push(idx); idx=(idx+k)%n; }
+          const verts = polyVertices(n);
+          let stepIndex=0; let t=0; const segSteps=110; const speed=this.speed;
+          runAnimation(() => {
+            for(let s=0;s<speed;s++){
+              const a = verts[ order[ stepIndex % order.length ] ];
+              const b = verts[ order[ (stepIndex+1) % order.length ] ];
+              const x = a[0] + (b[0]-a[0])*(t/segSteps);
+              const y = a[1] + (b[1]-a[1])*(t/segSteps);
+              if(t===0){ ctx.beginPath(); ctx.moveTo(a[0], a[1]); }
+              ctx.lineTo(x,y);
+              t++;
+              if(t>segSteps){ stepIndex++; t=0; }
+            }
+            ctx.stroke();
+            if(stepIndex >= order.length-1){ return false; }
+            return true;
+          });
+        }
+      },
+      // ====== 楕円 ======
+      ellipse: {
+        buildControls(){
+          controls.innerHTML='';
+          const d = DEFAULTS.ellipse; this._suppress=true;
+          const rx = addSlider('rx','横半径 rx',40, R, 1, d.rx, v=>{ this.rx=v; if(!this._suppress) this.restart(); });
+          const ry = addSlider('ry','縦半径 ry',40, R, 1, d.ry, v=>{ this.ry=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v=>{ this.speed=v; if(!this._suppress) this.restart(); });
+          this._els={rx,ry,speed}; this.rx=d.rx; this.ry=d.ry; this.speed=d.speed; this._suppress=false;
+        },
+        applyDefaults(){ const d = DEFAULTS.ellipse; this._suppress=true; this._els.rx.set(d.rx); this._els.ry.set(d.ry); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const steps = 900; let i=0; const speed=parseInt(this.speed,10);
+          ctx.beginPath(); ctx.moveTo(cx+this.rx, cy);
+          runAnimation(()=>{
+            for(let s=0;s<speed;s++){
+              const a=(i/steps)*2*Math.PI; const x = cx + this.rx*Math.cos(a); const y = cy + this.ry*Math.sin(a);
+              ctx.lineTo(x,y);
+              i++; if(i>steps){ ctx.stroke(); return false; }
+            }
+            ctx.stroke(); return true;
+          });
+        }
+      },
+      // ====== 扇形 ======
+      sector: {
+        buildControls(){
+          controls.innerHTML='';
+          const d = DEFAULTS.sector; this._suppress=true;
+          const r = addSlider('r','半径 r',40, Math.min(cx,cy), 1, d.r, v=>{ this.r=v; if(!this._suppress) this.restart(); });
+          const ang = addSlider('angle','角度（度）',5, 360, 1, d.angle, v=>{ this.angle=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v=>{ this.speed=v; if(!this._suppress) this.restart(); });
+          this._els={r,ang,speed}; this.r=d.r; this.angle=d.angle; this.speed=d.speed; this._suppress=false;
+        },
+        applyDefaults(){ const d = DEFAULTS.sector; this._suppress=true; this._els.r.set(d.r); this._els.ang.set(d.angle); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const steps = 600; let i=0; const speed=parseInt(this.speed,10);
+          const start = - (this.angle/2) * Math.PI/180; const end = (this.angle/2) * Math.PI/180;
+          runAnimation(()=>{
+            for(let s=0;s<speed;s++){
+              const a = start + (end-start)*(i/steps);
+              const x = cx + this.r*Math.cos(a); const y = cy + this.r*Math.sin(a);
+              if(i===0){ ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx + this.r*Math.cos(start), cy + this.r*Math.sin(start)); }
+              ctx.lineTo(x,y);
+              i++;
+              if(i>steps){ ctx.lineTo(cx,cy); ctx.closePath(); ctx.stroke(); return false; }
+            }
+            ctx.stroke(); return true;
+          });
+        }
+      },
+      // ====== 円環 ======
+      annulus: {
+        buildControls(){
+          controls.innerHTML='';
+          const d = DEFAULTS.annulus; this._suppress=true;
+          const rOut = addSlider('rOuter','外半径',60, Math.min(cx,cy), 1, d.rOuter, v=>{ this.rOuter=v; if(!this._suppress) this.restart(); });
+          const rIn = addSlider('rInner','内半径',20, Math.min(cx,cy)-20, 1, d.rInner, v=>{ this.rInner=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v=>{ this.speed=v; if(!this._suppress) this.restart(); });
+          this._els={rOut,rIn,speed}; this.rOuter=d.rOuter; this.rInner=d.rInner; this.speed=d.speed; this._suppress=false;
+        },
+        applyDefaults(){ const d = DEFAULTS.annulus; this._suppress=true; this._els.rOut.set(d.rOuter); this._els.rIn.set(d.rInner); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          let phase = 0; let i=0; const steps=720; const speed=parseInt(this.speed,10);
+          ctx.beginPath(); ctx.moveTo(cx + this.rOuter, cy);
+          runAnimation(()=>{
+            for(let s=0;s<speed;s++){
+              if(phase===0){
+                const a=(i/steps)*2*Math.PI; const x = cx + this.rOuter*Math.cos(a); const y = cy + this.rOuter*Math.sin(a);
+                ctx.lineTo(x,y); i++; if(i>steps){ phase=1; i=0; ctx.moveTo(cx + this.rInner, cy); }
+              } else {
+                const a=(i/steps)*2*Math.PI; const x = cx + this.rInner*Math.cos(-a); const y = cy + this.rInner*Math.sin(-a); // 逆回し
+                ctx.lineTo(x,y); i++; if(i>steps){ ctx.stroke(); return false; }
+              }
+            }
+            ctx.stroke(); return true;
+          });
+        }
+      },
+      // ====== リサージュ ======
+      lissajous: {
+        buildControls(){
+          controls.innerHTML = '';
+          const d = DEFAULTS.lissajous;
+          this._suppress = true;
+          const a = addSlider('a','a（周波数）',1,12,1,d.a, v => { this.a=v; if(!this._suppress) this.restart(); });
+          const b = addSlider('b','b（周波数）',1,12,1,d.b, v => { this.b=v; if(!this._suppress) this.restart(); });
+          const delta = addSlider('delta','δ（度）',0,360,1,d.delta, v => { this.delta=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v => { this.speed=v; if(!this._suppress) this.restart(); });
+          this._els = { a, b, delta, speed };
+          this.a=d.a; this.b=d.b; this.delta=d.delta; this.speed=d.speed;
+          this._suppress = false;
+        },
+        applyDefaults(){ const d = DEFAULTS.lissajous; this._suppress=true; this._els.a.set(d.a); this._els.b.set(d.b); this._els.delta.set(d.delta); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const total = 4000; let i=0; const speed=this.speed|0; const a=this.a, b=this.b, delta=this.delta*Math.PI/180;
+          runAnimation(() => {
+            const remaining = total - i; const adv = Math.min(speed, remaining);
+            for(let k=0;k<adv;k++){
+              const t = (i/total)*2*Math.PI;
+              const x = cx + R*Math.sin(a*t + delta);
+              const y = cy + R*Math.sin(b*t);
+              if(i===0){ ctx.beginPath(); ctx.moveTo(x,y); } else { ctx.lineTo(x,y); }
+              i++;
+            }
+            if(i>=total){
+              const xEnd = cx + R*Math.sin(2*Math.PI*a + delta);
+              const yEnd = cy + R*Math.sin(2*Math.PI*b);
+              ctx.lineTo(xEnd, yEnd);
+              ctx.stroke();
+              return false;
+            }
+            ctx.stroke();
+            return true;
+          });
+        }
+      },
+      // ====== ローズ曲線 ======
+      rose: {
+        buildControls(){
+          controls.innerHTML='';
+          const d = DEFAULTS.rose; this._suppress=true;
+          const k = addSlider('k','k（花びら比）',0.5,12,0.1,d.k, v=>{ this.k=v; if(!this._suppress) this.restart(); });
+          const speed = addSlider('speed','速度',1,10,1,d.speed, v=>{ this.speed=v; if(!this._suppress) this.restart(); });
+          this._els={k,speed}; this.k=d.k; this.speed=d.speed; this._suppress=false;
+        },
+        applyDefaults(){ const d = DEFAULTS.rose; this._suppress=true; this._els.k.set(d.k); this._els.speed.set(d.speed); this._suppress=false; this.restart(); },
+        restart(){ cancelAnim(); clearCanvas();
+          const kVal = this.k; const isInt = Math.abs(kVal - Math.round(kVal)) < 1e-9; const kInt = Math.round(kVal);
+          const T = (isInt && (kInt % 2 === 1)) ? Math.PI : 2*Math.PI; // 奇数kはπで閉じる、他は2π
+          const total = 3600; let i=0; const speed = this.speed|0;
+          runAnimation(()=>{
+            const remaining = total - i; const adv = Math.min(speed, remaining);
+            for(let s=0;s<adv;s++){
+              const t = (i/total)*T;
+              const ro = R * Math.cos(kVal * t);
+              const x = cx + ro * Math.cos(t);
+              const y = cy + ro * Math.sin(t);
+              if(i===0){ ctx.beginPath(); ctx.moveTo(x,y); } else { ctx.lineTo(x,y); }
+              i++;
+            }
+            if(i>=total){
+              const xEnd = cx + (R * Math.cos(kVal * T)) * Math.cos(T);
+              const yEnd = cy + (R * Math.cos(kVal * T)) * Math.sin(T);
+              ctx.lineTo(xEnd, yEnd);
+              ctx.stroke();
+              return false;
+            }
+            ctx.stroke();
+            return true;
+          });
+        }
+      }
+    }; // end Shapes（ここでオブジェクトを閉じる）
+
+    // ====== UI配線 ======
+    let currentShapeKey = null;
+    const buttons = document.querySelectorAll('.btn');
+
+    buttons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        // アクティブ切替
+        buttons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // 形の選択
+        const shape = btn.dataset.shape; 
+        currentShapeKey = shape;
+        const S = Shapes[shape];
+        if(!S) return;
+        S.buildControls();
+        S.applyDefaults(); // まず標準に合わせてから描画
+      });
+    });
+
+    document.getElementById('stopBtn').addEventListener('click', () => cancelAnim());
+    document.getElementById('clearBtn').addEventListener('click', () => { cancelAnim(); clearCanvas(); statusEl.textContent='クリア'; });
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      if(!currentShapeKey) return; const S = Shapes[currentShapeKey]; if(S && S.applyDefaults) S.applyDefaults();
+    });
+  </script>
+</body>
+</html>
+
+
+
